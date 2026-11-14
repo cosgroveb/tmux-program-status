@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install actionlint
+        run: |
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/rhysd/actionlint/cmd/actionlint@914e7df21a07ef503a81201c76d2b11c789d3fca # v1.7.12
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: ShellCheck
+        run: shellcheck program-status.tmux
+      - name: actionlint
+        run: actionlint .github/workflows/ci.yml
+
+  test:
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libevent-dev ncurses-dev automake bison pkg-config tmux
+      - name: Install dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew install libevent ncurses automake bison pkg-config tmux
+      - name: Build pinned tmux with OSC 7501 and OSC 9;4
+        env:
+          TMUX_SOURCE: 75fac4a77bb40dc655f8b217071c224c0c819c7f
+        run: |
+          curl -fsSL "https://github.com/tmux/tmux/archive/$TMUX_SOURCE.tar.gz" \
+            -o "$RUNNER_TEMP/tmux-$TMUX_SOURCE.tar.gz"
+          tar -xzf "$RUNNER_TEMP/tmux-$TMUX_SOURCE.tar.gz" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/tmux-$TMUX_SOURCE"
+          sh autogen.sh
+          ./configure --prefix="$RUNNER_TEMP/tmux-native"
+          make -j2
+          make install
+      - name: Test pinned native build
+        env:
+          TMUX_PROGRAM_STATUS_REQUIRE_FEATURES: "1"
+        run: python3 tests/integration.py "$RUNNER_TEMP/tmux-native/bin/tmux"
+      - name: Build tmux 3.4 without the protocol fields
+        if: runner.os == 'Linux'
+        env:
+          TMUX_SOURCE: 3.4
+        run: |
+          curl -fsSL "https://github.com/tmux/tmux/releases/download/$TMUX_SOURCE/tmux-$TMUX_SOURCE.tar.gz" \
+            -o "$RUNNER_TEMP/tmux-$TMUX_SOURCE.tar.gz"
+          tar -xzf "$RUNNER_TEMP/tmux-$TMUX_SOURCE.tar.gz" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/tmux-$TMUX_SOURCE"
+          ./configure --prefix="$RUNNER_TEMP/tmux-3.4"
+          make -j2
+          make install
+      - name: Test tmux 3.4 without the protocol fields
+        if: runner.os == 'Linux'
+        run: python3 tests/integration.py "$RUNNER_TEMP/tmux-3.4/bin/tmux"
+      - name: Test installed tmux
+        run: TMUX_BIN="$(command -v tmux)" python3 tests/integration.py
